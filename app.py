@@ -1,14 +1,15 @@
 import sqlite3
-from flask import Flask, jsonify, request
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
+
 # Initialize SQLite Database for eBuilds
 def init_db():
-    conn = sqlite3.connect("ebuilds_laios.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        """
+  conn = sqlite3.connect("ebuilds_laios.db")
+  cursor = conn.cursor()
+  cursor.execute("""
         CREATE TABLE IF NOT EXISTS quotes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             quote_id TEXT,
@@ -18,79 +19,63 @@ def init_db():
             status TEXT,
             date TEXT
         )
-    """
-    )
-    conn.commit()
-    conn.close()
+    """)
+  conn.commit()
+  conn.close()
 
 
 init_db()
 
 
-# Webhook verification for Meta WhatsApp API
-@app.route("/webhook", methods=["GET"])
-def verify_webhook():
-    verify_token = "ebuilds_secure_token"  # Set this in your Meta dashboard
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-
-    if mode and token:
-        if mode == "subscribe" and token == verify_token:
-            return challenge, 200
-        else:
-            return "Verification failed", 403
-    return "eBuilds LAIOS Webhook Server Online", 200
+@app.route("/", methods=["GET"])
+def home():
+  return "eBuilds LAIOS Server Online", 200
 
 
-# Receive Incoming WhatsApp Messages
-@app.route("/webhook", methods=["POST"])
+# Receive Incoming WhatsApp Messages from Twilio
+@app.route("/whatsapp", methods=["POST"])
 def receive_whatsapp():
-    data = request.json
-    try:
-        # Extract message details from Meta WhatsApp Cloud API payload
-        message_entry = data["entry"][0]["changes"][0]["value"]
-        if "messages" in message_entry:
-            sender_phone = message_entry["messages"][0]["from"]
-            message_body = message_entry["messages"][0]["text"][
-                "body"
-            ].lower()
+  # Twilio sends incoming data as form values, not JSON
+  incoming_msg = request.values.get("Body", "").strip().lower()
+  sender = request.values.get("From", "")
 
-            # Simple parser for building materials & tonnage (e.g., "15 tons of crusher dust")
-            material = "Aggregate G1"  # Default
-            if "crusher dust" in message_body:
-                material = "Crusher Dust"
-            elif "sand" in message_body:
-                material = "Building Sand"
-            elif "19mm" in message_body or "stone" in message_body:
-                material = "19mm Stone"
-            elif "g2" in message_body:
-                material = "Aggregate G2"
+  # Simple parser for building materials & tonnage
+  material = "Aggregate G1"  # Default
+  if "crusher dust" in incoming_msg:
+    material = "Crusher Dust"
+  elif "sand" in incoming_msg:
+    material = "Building Sand"
+  elif "19mm" in incoming_msg or "stone" in incoming_msg:
+    material = "19mm Stone"
+  elif "g2" in incoming_msg:
+    material = "Aggregate G2"
 
-            # Log into SQLite database
-            conn = sqlite3.connect("ebuilds_laios.db")
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM quotes")
-            count = cursor.fetchone()[0]
-            quote_id = f"Q-20{count + 1}"
+  # Log into SQLite database
+  conn = sqlite3.connect("ebuilds_laios.db")
+  cursor = conn.cursor()
+  cursor.execute("SELECT COUNT(*) FROM quotes")
+  count = cursor.fetchone()[0]
+  quote_id = f"Q-20{count + 1}"
 
-            cursor.execute(
-                """
-                INSERT INTO quotes (quote_id, client, material, tons, status, date)
-                VALUES (?, ?, ?, ?, ?, datetime('now'))
-            """,
-                (quote_id, f"WhatsApp: {sender_phone}", material, 10.0, "Pending"),
-            )
+  # Insert quote record (defaulting to 1 ton for test messages)
+  cursor.execute(
+      "INSERT INTO quotes (quote_id, client, material, tons, status, date) VALUES"
+      " (?, ?, ?, ?, ?, datetime('now'))",
+      (quote_id, sender, material, 1.0, "Pending"),
+  )
+  conn.commit()
+  conn.close()
 
-            conn.commit()
-            conn.close()
+  # Create automated reply back via Twilio
+  resp = MessagingResponse()
+  msg = resp.message()
+  msg.body(
+      f"Thanks from eBuilds! Your quote ({quote_id}) for {material} has been"
+      " logged successfully."
+  )
 
-            return jsonify({"status": "success", "quote_id": quote_id}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
-
-    return jsonify({"status": "ignored"}), 200
+  return str(resp)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+  app.run(port=5000)
